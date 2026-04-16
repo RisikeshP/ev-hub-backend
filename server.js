@@ -1,190 +1,257 @@
-/*
-============================================================
- RAR EV CHARGING HUB — CLEAN BACKEND (RAILWAY READY)
-============================================================
-*/
-
 const express = require("express");
 const cors = require("cors");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// ==========================
+// ======================
 // MIDDLEWARE
-// ==========================
+// ======================
 app.use(cors());
 app.use(express.json());
 
-// ==========================
-// GLOBAL STATE (SINGLE SOURCE OF TRUTH)
-// ==========================
-let stationState = {
-  stationId: "A1",
-  stationName: "RAR Charging Hub",
-  carPresent: false,
-  relayOn: false,
-  voltage: 0,
-  current_mA: 0,
-  power_mW: 0,
-  bookingStatus: "available", // available | booked | busy
-  slotBooked: false,
-  sessionActive: false,
-  lastUpdated: null,
+// ======================
+// CENTRAL STATION STATE
+// ======================
+let station = {
+  stationId: "EV-STATION-01",
+
+  slot: {
+    status: "FREE" // FREE | OCCUPIED
+  },
+
+  booking: {
+    active: false,
+    status: "IDLE", // IDLE | BOOKED | BUSY
+    bookingId: null,
+    time: null,
+    user: {
+      userId: null,
+      name: null,
+      vehicleNumber: null
+    }
+  },
+
+  charging: {
+    active: false,
+    relay: false
+  },
+
+  telemetry: {
+    voltage: 0,
+    current: 0,
+    power: 0
+  },
+
+  ui: {
+    lastAction: null, // BOOK | START | STOP | SENSOR
+    source: null      // web | esp32
+  },
+
+  lastUpdate: null
 };
 
-let carState = {
-  tp4056Status: "idle",
-  batteryVoltage: 0,
-  batteryPercent: 0,
-  lastUpdated: null,
-};
-
+// booking log
 let bookings = [];
-let sessionHistory = [];
-let currentSession = null;
 
-// ==========================
-// ROOT CHECK
-// ==========================
+// ======================
+// ROOT TEST
+// ======================
 app.get("/", (req, res) => {
-  res.send("EV IoT Backend Running 🚀");
+  res.send("EV Charging Backend Running 🚀");
 });
 
-// ==========================
-// LIVE DASHBOARD API
-// ==========================
-app.get("/api/live", (req, res) => {
+// ======================
+// FULL STATUS (WEB DASHBOARD)
+// ======================
+app.get("/api/status", (req, res) => {
   res.json({
-    station: stationState,
-    car: carState,
-    session: currentSession,
-    bookings,
-    timestamp: new Date().toISOString(),
+    stationId: station.stationId,
+    slot: station.slot.status,
+    booking: station.booking,
+    charging: station.charging,
+    telemetry: station.telemetry,
+    ui: station.ui,
+    lastUpdate: station.lastUpdate
   });
 });
 
-// ==========================
-// ESP32 STATION DATA
-// ==========================
-app.post("/api/station-data", (req, res) => {
-  const {
-    stationId,
-    stationName,
-    carPresent,
-    relayOn,
-    voltage,
-    current_mA,
-    power_mW,
-    sessionActive,
-  } = req.body;
+// ======================
+// BOOK SLOT (WEB INPUT)
+// ======================
+app.post("/api/book", (req, res) => {
+  const { userId, name, vehicleNumber } = req.body;
 
-  stationState = {
-    ...stationState,
-    stationId: stationId || stationState.stationId,
-    stationName: stationName || stationState.stationName,
-    carPresent: Boolean(carPresent),
-    relayOn: Boolean(relayOn),
-    voltage: parseFloat(voltage) || 0,
-    current_mA: parseFloat(current_mA) || 0,
-    power_mW: parseFloat(power_mW) || 0,
-    sessionActive: Boolean(sessionActive),
-    lastUpdated: new Date().toISOString(),
-  };
-
-  // Booking logic
-  if (stationState.carPresent && stationState.sessionActive) {
-    stationState.bookingStatus = "busy";
-  } else if (stationState.slotBooked) {
-    stationState.bookingStatus = "booked";
-  } else {
-    stationState.bookingStatus = "available";
-  }
-
-  // Start session
-  if (stationState.carPresent && stationState.sessionActive && !currentSession) {
-    currentSession = {
-      id: "S" + Date.now(),
-      startTime: new Date().toISOString(),
-      energyWh: 0,
-      status: "active",
-    };
-  }
-
-  // Energy calculation
-  if (currentSession && stationState.power_mW > 0) {
-    currentSession.energyWh += (stationState.power_mW / 1000) * (3 / 3600);
-  }
-
-  res.json({ ok: true, stationState });
-});
-
-// ==========================
-// ESP32 CAR DATA
-// ==========================
-app.post("/api/car-data", (req, res) => {
-  const { tp4056Status, batteryVoltage, batteryPercent } = req.body;
-
-  carState = {
-    tp4056Status: tp4056Status || "idle",
-    batteryVoltage: parseFloat(batteryVoltage) || 0,
-    batteryPercent: parseInt(batteryPercent) || 0,
-    lastUpdated: new Date().toISOString(),
-  };
-
-  res.json({ ok: true, carState });
-});
-
-// ==========================
-// BOOK SLOT (WEB)
-// ==========================
-app.post("/api/book-slot", (req, res) => {
-  const { userId } = req.body;
-
-  if (stationState.bookingStatus === "busy") {
+  if (station.booking.active) {
     return res.status(409).json({
       ok: false,
-      message: "Station is busy",
+      message: "Station already booked"
     });
   }
 
-  const booking = {
-    bookingId: "B" + Date.now(),
-    userId: userId || "guest",
-    status: "confirmed",
+  const bookingId = "B" + Date.now();
+
+  station.booking = {
+    active: true,
+    status: "BOOKED",
+    bookingId,
     time: new Date().toISOString(),
+    user: {
+      userId: userId || "guest",
+      name: name || "unknown",
+      vehicleNumber: vehicleNumber || "NA"
+    }
   };
 
-  bookings.push(booking);
+  bookings.push(station.booking);
 
-  stationState.slotBooked = true;
-  stationState.bookingStatus = "booked";
+  station.ui = {
+    lastAction: "BOOK",
+    source: "web"
+  };
 
-  res.json({ ok: true, booking });
+  res.json({
+    ok: true,
+    message: "Booking successful",
+    station
+  });
 });
 
-// ==========================
-// END SESSION
-// ==========================
-app.post("/api/session/end", (req, res) => {
-  if (currentSession) {
-    currentSession.endTime = new Date().toISOString();
-    currentSession.status = "completed";
-
-    sessionHistory.unshift(currentSession);
-    currentSession = null;
+// ======================
+// START CHARGING
+// ======================
+app.post("/api/start", (req, res) => {
+  if (!station.booking.active) {
+    return res.status(403).json({
+      ok: false,
+      message: "No active booking"
+    });
   }
 
-  stationState.carPresent = false;
-  stationState.slotBooked = false;
-  stationState.bookingStatus = "available";
+  station.charging = {
+    active: true,
+    relay: true
+  };
 
-  res.json({ ok: true, message: "Session ended" });
+  station.booking.status = "BUSY";
+
+  station.ui = {
+    lastAction: "START",
+    source: "web"
+  };
+
+  res.json({
+    ok: true,
+    message: "Charging started",
+    station
+  });
 });
 
-// ==========================
-// START SERVER (ONLY ONCE)
-// ==========================
+// ======================
+// STOP CHARGING
+// ======================
+app.post("/api/stop", (req, res) => {
+  station.charging = {
+    active: false,
+    relay: false
+  };
+
+  station.booking = {
+    active: false,
+    status: "IDLE",
+    bookingId: null,
+    time: null,
+    user: {
+      userId: null,
+      name: null,
+      vehicleNumber: null
+    }
+  };
+
+  station.ui = {
+    lastAction: "STOP",
+    source: "web"
+  };
+
+  res.json({
+    ok: true,
+    message: "Charging stopped",
+    station
+  });
+});
+
+// ======================
+// ESP32 UPDATE (IR + SENSOR DATA)
+// ======================
+app.post("/api/esp/update", (req, res) => {
+  const { slot, voltage, current, power } = req.body;
+
+  if (slot) {
+    station.slot.status = slot; // FREE | OCCUPIED
+  }
+
+  if (voltage !== undefined) station.telemetry.voltage = voltage;
+  if (current !== undefined) station.telemetry.current = current;
+  if (power !== undefined) station.telemetry.power = power;
+
+  station.ui = {
+    lastAction: "SENSOR",
+    source: "esp32"
+  };
+
+  station.lastUpdate = new Date().toISOString();
+
+  res.json({
+    ok: true,
+    message: "ESP data updated",
+    station
+  });
+});
+
+// ======================
+// BOOKING HISTORY (DEBUG / JOURNAL PROOF)
+// ======================
+app.get("/api/bookings", (req, res) => {
+  res.json(bookings);
+});
+
+// ======================
+// RESET SYSTEM (OPTIONAL TEST)
+// ======================
+app.post("/api/reset", (req, res) => {
+  station = {
+    stationId: "EV-STATION-01",
+    slot: { status: "FREE" },
+    booking: {
+      active: false,
+      status: "IDLE",
+      bookingId: null,
+      time: null,
+      user: { userId: null, name: null, vehicleNumber: null }
+    },
+    charging: {
+      active: false,
+      relay: false
+    },
+    telemetry: {
+      voltage: 0,
+      current: 0,
+      power: 0
+    },
+    ui: {
+      lastAction: null,
+      source: null
+    },
+    lastUpdate: new Date().toISOString()
+  };
+
+  res.json({ ok: true, station });
+});
+
+// ======================
+// START SERVER
+// ======================
+const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
-  console.log("Server running on port " + PORT);
+  console.log("EV Charging Backend running on port", PORT);
 });
