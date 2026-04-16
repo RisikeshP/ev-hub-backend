@@ -15,14 +15,124 @@
  * ============================================================
  */
 
-const express = require('express');
-const cors    = require('cors');
-const app     = express();
-const PORT    = process.env.PORT || 3000;
+const express = require("express");
+const cors = require("cors");
 
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// ==========================
+// MIDDLEWARE
+// ==========================
 app.use(cors());
 app.use(express.json());
 
+// ==========================
+// GLOBAL STATE (TEMP STORAGE)
+// ==========================
+let deviceData = {
+  carDetected: 0,
+  voltage: 0,
+  current: 0,
+  timestamp: null
+};
+
+let command = "IDLE"; // START / STOP / IDLE
+
+let slotStatus = {
+  booked: false,
+  user: null
+};
+
+// ==========================
+// ESP32 → BACKEND (SEND SENSOR DATA)
+// ==========================
+app.post("/api/update-status", (req, res) => {
+  deviceData = {
+    ...req.body,
+    timestamp: new Date().toISOString()
+  };
+
+  console.log("📡 ESP32 DATA RECEIVED:", deviceData);
+
+  res.json({
+    status: "OK",
+    message: "Data updated successfully"
+  });
+});
+
+// ==========================
+// ESP32 ← BACKEND (GET COMMAND)
+// ==========================
+app.get("/api/get-command", (req, res) => {
+  res.json({
+    command: command
+  });
+});
+
+// ==========================
+// WEB → BACKEND (SET COMMAND START/STOP CHARGING)
+// ==========================
+app.post("/api/set-command", (req, res) => {
+  command = req.body.command; // START / STOP / IDLE
+
+  console.log("⚡ COMMAND UPDATED:", command);
+
+  res.json({
+    status: "UPDATED",
+    command: command
+  });
+});
+
+// ==========================
+// SLOT BOOKING (WEB)
+// ==========================
+app.post("/api/book-slot", (req, res) => {
+  const { user } = req.body;
+
+  slotStatus = {
+    booked: true,
+    user: user || "anonymous"
+  };
+
+  console.log("🅿️ SLOT BOOKED BY:", slotStatus.user);
+
+  // Auto trigger charging when booked (optional logic)
+  command = "START";
+
+  res.json({
+    status: "BOOKED",
+    slotStatus
+  });
+});
+
+// ==========================
+// GET SLOT STATUS (WEB)
+// ==========================
+app.get("/api/slot-status", (req, res) => {
+  res.json(slotStatus);
+});
+
+// ==========================
+// LIVE SENSOR DATA (WEB DASHBOARD)
+// ==========================
+app.get("/api/status", (req, res) => {
+  res.json(deviceData);
+});
+
+// ==========================
+// HEALTH CHECK
+// ==========================
+app.get("/", (req, res) => {
+  res.send("EV IoT Backend Running 🚀");
+});
+
+// ==========================
+// START SERVER
+// ==========================
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
 // ──────────────────────────────────────────────
 //  IN-MEMORY STATE  (replace with DB if needed)
 // ──────────────────────────────────────────────
